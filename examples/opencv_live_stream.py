@@ -12,6 +12,7 @@ from __future__ import annotations
 import sys
 import os
 import time
+import re
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "python")))
@@ -36,11 +37,12 @@ def main():
     client = PureHikClient(DVR_HOST, DVR_PORT, DVR_USER, DVR_PASS)
     rtsp_url = client.get_rtsp_url(CHANNEL_ID, STREAM_PROFILE, RTSP_PORT)
 
+    masked_url = re.sub(r'://([^:]+):([^@]+)@', r'://\1:******@', rtsp_url)
     print("==================================================")
     print("      OpenHik-DVR - OpenCV Live Stream Demo       ")
     print("==================================================")
     print(f"Camera Channel : {CHANNEL_ID} ({'Main Stream' if STREAM_PROFILE == 1 else 'Sub Stream'})")
-    print(f"Connecting to  : {rtsp_url[:35]}... (credentials masked)")
+    print(f"Connecting to  : {masked_url}")
     print("Force TCP Transport enabled to avoid UDP packet loss.")
     print("Press 'q' in the video window to exit.")
     print("==================================================")
@@ -62,9 +64,12 @@ def main():
 
     while True:
         ret, frame = cap.read()
-        if not ret:
-            print("Warning: Dropped frame or stream disconnected. Reconnecting...")
-            time.sleep(1)
+        if not ret or frame is None:
+            print("Warning: Stream disconnected. Attempting reconnection...")
+            cap.release()
+            time.sleep(2)
+            cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             continue
 
         frame_count += 1

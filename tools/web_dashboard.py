@@ -11,9 +11,10 @@ import os
 import time
 import argparse
 import json
+import re
 import urllib.parse
 from xml.sax.saxutils import escape
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 
 # Add parent directory to path
@@ -116,7 +117,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="stat-card">
             <div class="stat-title">Active Cameras</div>
             <div class="stat-value" id="val-channels">-</div>
-            <div class="stat-sub">16 Analog Channels Ready</div>
+            <div class="stat-sub" id="val-channels-sub">Video Channels Ready</div>
         </div>
     </div>
 
@@ -198,6 +199,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 const res = await fetch('/api/channels');
                 channelsData = await res.json();
                 document.getElementById('val-channels').innerText = channelsData.length + ' Channels';
+                const sub = document.getElementById('val-channels-sub');
+                if (sub) sub.innerText = `${channelsData.length} Video Channels Ready`;
 
                 const grid = document.getElementById('view-grid');
                 const sel = document.getElementById('sel-channel');
@@ -274,8 +277,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             }
         }
 
-        // Set default date to today
-        document.getElementById('sel-date').value = new Date().toISOString().split('T')[0];
+        // Set default date to local calendar date
+        const localNow = new Date();
+        const y = localNow.getFullYear();
+        const m = String(localNow.getMonth() + 1).padStart(2, '0');
+        const d = String(localNow.getDate()).padStart(2, '0');
+        document.getElementById('sel-date').value = `${y}-${m}-${d}`;
 
         loadTelemetry();
         loadChannels();
@@ -287,11 +294,36 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 class DashboardServer(BaseHTTPRequestHandler):
     client: PureHikClient = None
+    auth_credentials: str | None = None
 
     def log_message(self, format, *args):
         pass # Suppress noisy request logs
 
+    def check_auth(self) -> bool:
+        if not self.auth_credentials:
+            return True
+        auth_header = self.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Basic '):
+            return False
+        import base64
+        try:
+            decoded = base64.b64decode(auth_header.split(' ', 1)[1]).decode('utf-8')
+            return decoded == self.auth_credentials
+        except Exception:
+            return False
+
+    def require_auth(self):
+        self.send_response(401)
+        self.send_header('WWW-Authenticate', 'Basic realm="OpenHik Dashboard"')
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"401 Unauthorized: Valid dashboard credentials required.\n")
+
     def do_GET(self):
+        if not self.check_auth():
+            self.require_auth()
+            return
+
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
@@ -374,10 +406,18 @@ class DashboardServer(BaseHTTPRequestHandler):
 
         elif path == "/api/download":
             uri = query.get("uri", [""])[0]
-            filename = query.get("filename", ["recording.ps"])[0]
-            if not uri:
-                self.send_error(400, "Missing uri parameter")
+            raw_filename = query.get("filename", ["recording.ps"])[0]
+            
+            # Security validations: prevent arbitrary SSRF and header injection
+            if not uri or not (uri.startswith("rtsp://") or uri.startswith("/ISAPI/") or uri.startswith("/PSIA/")):
+                self.send_error(400, "Invalid or prohibited uri parameter")
                 return
+
+            # Sanitize filename: strip path traversal and HTTP control characters
+            clean_filename = os.path.basename(raw_filename)
+            clean_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', clean_filename)
+            if not clean_filename.endswith(('.ps', '.mp4', '.mkv', '.raw')):
+                clean_filename += '.ps'
 
             try:
                 esc_uri = escape(uri)
@@ -394,7 +434,7 @@ class DashboardServer(BaseHTTPRequestHandler):
                             data=dl_xml.encode('utf-8'),
                             headers={'Content-Type': 'application/xml', 'User-Agent': 'OpenHik-Client/1.0'}
                         )
-                        resp = self.client.opener.open(req, timeout=10.0)
+                        resp = self.client.opener.open(req, timeout=30.0)
                         break
                     except urllib.error.HTTPError as e:
                         if e.code in (404, 405): continue
@@ -406,7 +446,7 @@ class DashboardServer(BaseHTTPRequestHandler):
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                self.send_header("Content-Disposition", f'attachment; filename="{clean_filename}"')
                 self.end_headers()
 
                 with resp:
@@ -425,24 +465,28 @@ def parse_args():
     parser.add_argument("--port", type=int, default=80, help="DVR HTTP port (default: 80)")
     parser.add_argument("--user", default="admin", help="Username (default: admin)")
     parser.add_argument("--pass", dest="password", default="", help="Password")
-    parser.add_argument("--bind", default="0.0.0.0", help="Web dashboard bind IP (default: 0.0.0.0)")
+    parser.add_argument("--bind", default="127.0.0.1", help="Web dashboard bind IP (default: 127.0.0.1 for local security)")
     parser.add_argument("--web-port", type=int, default=8080, help="Web dashboard port (default: 8080)")
+    parser.add_argument("--auth", help="Optional dashboard Basic Auth credentials in 'username:password' format")
     return parser.parse_args()
 
 def main():
     args = parse_args()
     client = PureHikClient(args.host, args.port, args.user, args.password)
     DashboardServer.client = client
+    DashboardServer.auth_credentials = args.auth
 
     server_address = (args.bind, args.web_port)
-    httpd = HTTPServer(server_address, DashboardServer)
+    httpd = ThreadingHTTPServer(server_address, DashboardServer)
 
     print("==================================================")
     print("      OpenHik-DVR - Modern HTML5 Web Dashboard    ")
     print("==================================================")
     print(f"Target DVR     : {args.host}:{args.port}")
-    print(f"Web Dashboard  : http://localhost:{args.web_port}")
-    print(f"Network Access : http://{args.bind}:{args.web_port}")
+    print(f"Web Dashboard  : http://{args.bind}:{args.web_port}")
+    if args.auth:
+        print("Authentication : ENABLED (Basic Auth)")
+    print("Multi-Threaded : ACTIVE (Concurrent downloads & live snapshots)")
     print("Zero ActiveX / Works in Chrome, Edge, Safari, iOS, Android")
     print("==================================================")
     print("Server running... (Press Ctrl+C to stop)")

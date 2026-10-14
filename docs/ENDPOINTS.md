@@ -24,11 +24,11 @@ Returns hardware serial numbers, device model, MAC address, and firmware version
 Returns real-time device health, CPU load, and uptime.
 ```xml
 <DeviceStatus version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
-    <currentDeviceTime>2026-10-14T10:13:46+03:00</currentDeviceTime>
-    <deviceUpTime>6216984</deviceUpTime>
+    <currentDeviceTime>2026-01-01T12:00:00+00:00</currentDeviceTime>
+    <deviceUpTime>123456</deviceUpTime>
     <CPUList>
         <CPU>
-            <cpuUtilization>59</cpuUtilization>
+            <cpuUtilization>25</cpuUtilization>
         </CPU>
     </CPUList>
 </DeviceStatus>
@@ -67,8 +67,8 @@ Queries SATA and NAS drive health, capacity, partition type, and free space.
             <hddName>hdd1</hddName>
             <hddType>SATA</hddType>
             <status>ok</status>
-            <capacity>5723166</capacity>
-            <freeSpace>0</freeSpace>
+            <capacity>2000000</capacity>
+            <freeSpace>500000</freeSpace>
             <property>RW</property>
         </hdd>
     </hddList>

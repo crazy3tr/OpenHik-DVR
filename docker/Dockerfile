@@ -26,5 +26,5 @@ ENV OUTPUT_DIR="/recordings"
 # Web Dashboard Port
 EXPOSE 8080
 
-# Default command: launch the ActiveX-free modern Web Dashboard
-CMD ["python", "tools/web_dashboard.py", "--host", "192.168.1.100", "--web-port", "8080", "--bind", "0.0.0.0"]
+# Default command: launch the ActiveX-free modern Web Dashboard using ENV parameters
+CMD ["sh", "-c", "python tools/web_dashboard.py --host \"$DVR_HOST\" --port \"$DVR_PORT\" --user \"$DVR_USER\" --pass \"$DVR_PASS\" --bind 0.0.0.0 --web-port \"$WEB_PORT\""]

@@ -226,11 +226,13 @@ class PureHikClient:
                 raw_z = local_dt.strftime("%z")
                 tz_offset = f"{raw_z[:3]}:{raw_z[3:]}" if raw_z else "+00:00"
             else:
-                # Derive local system timezone offset dynamically
+                # Derive local system timezone offset dynamically without negative floor division bug
                 offset_sec = -time.timezone if (time.localtime().tm_isdst == 0) else -time.altzone
-                hours = int(offset_sec // 3600)
-                minutes = int((abs(offset_sec) % 3600) // 60)
-                tz_offset = f"{hours:+03d}:{minutes:02d}"
+                sign = "-" if offset_sec < 0 else "+"
+                total_sec = abs(offset_sec)
+                hours = total_sec // 3600
+                minutes = (total_sec % 3600) // 60
+                tz_offset = f"{sign}{hours:02d}:{minutes:02d}"
 
         time_str = local_dt.strftime("%Y-%m-%dT%H:%M:%S") + tz_offset
         xml_payload = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -264,18 +266,40 @@ class PureHikClient:
         return storages
 
     def get_video_channels(self) -> list[VideoChannel]:
-        """Lists all camera input channels (names, port, and enabled status)."""
-        raw = self._request("GET", "/ISAPI/System/Video/inputs/channels")
-        root = ET.fromstring(raw)
-        channels = []
-        for ch in root.iter():
-            if _lname(ch.tag) == "VideoInputChannel":
-                cid = _find_text(ch, "id")
-                channels.append(VideoChannel(
-                    channel_id=int(cid) if cid.isdigit() else 0,
-                    name=_find_text(ch, "name"),
-                    enabled=_find_text(ch, "videoInputEnabled").lower() == "true"
-                ))
+        """Lists all camera input channels (analog inputs and NVR IP proxy channels)."""
+        channels: list[VideoChannel] = []
+        # 1. Analog / Direct Video Input Channels
+        try:
+            raw = self._request("GET", "/ISAPI/System/Video/inputs/channels")
+            root = ET.fromstring(raw)
+            for ch in root.iter():
+                if _lname(ch.tag) == "VideoInputChannel":
+                    cid = _find_text(ch, "id")
+                    channels.append(VideoChannel(
+                        channel_id=int(cid) if cid.isdigit() else 0,
+                        name=_find_text(ch, "name"),
+                        enabled=_find_text(ch, "videoInputEnabled").lower() == "true"
+                    ))
+        except Exception:
+            pass
+
+        # 2. Digital / IP Proxy Channels (on NVRs and hybrid DVRs)
+        try:
+            raw = self._request("GET", "/ISAPI/ContentMgmt/InputProxy/channels")
+            root = ET.fromstring(raw)
+            for ch in root.iter():
+                if _lname(ch.tag) == "InputProxyChannel":
+                    cid = _find_text(ch, "id")
+                    int_cid = int(cid) if cid.isdigit() else 0
+                    if not any(c.channel_id == int_cid for c in channels):
+                        channels.append(VideoChannel(
+                            channel_id=int_cid,
+                            name=_find_text(ch, "name"),
+                            enabled=True
+                        ))
+        except Exception:
+            pass
+
         return channels
 
     def set_channel_name(self, channel_id: int, new_name: str) -> bool:

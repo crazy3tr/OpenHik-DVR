@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Text;
@@ -18,13 +19,14 @@ namespace HikDvrSdk
         private readonly string _baseUrl;
         private readonly CredentialCache _credentialCache;
 
-        public HikClient(string host, int port = 80, string user = "admin", string password = "")
+        public HikClient(string host, int port = 80, string user = "admin", string password = "", bool useHttps = false)
         {
             _host = host;
             _port = port;
             _user = user;
             _password = password;
-            _baseUrl = string.Format("http://{0}:{1}", _host, _port);
+            string proto = useHttps ? "https" : "http";
+            _baseUrl = string.Format(CultureInfo.InvariantCulture, "{0}://{1}:{2}", proto, _host, _port);
 
             _credentialCache = new CredentialCache();
             _credentialCache.Add(new Uri(_baseUrl), "Digest", new NetworkCredential(_user, _password));
@@ -149,26 +151,62 @@ namespace HikDvrSdk
 
         public List<VideoChannel> GetVideoChannels()
         {
-            string xml = ExecuteRequest("GET", "/ISAPI/System/Video/inputs/channels");
-            var doc = new XmlDocument();
-            doc.LoadXml(xml);
-
             var list = new List<VideoChannel>();
-            var chNodes = doc.GetElementsByTagName("VideoInputChannel");
-            foreach (XmlNode ch in chNodes)
+            // 1. Direct / Analog Video Inputs
+            try
             {
-                string idStr = GetLocalTagText(ch, "id");
-                string enabledStr = GetLocalTagText(ch, "videoInputEnabled");
-                int id = 0;
-                int.TryParse(idStr, out id);
-
-                list.Add(new VideoChannel
+                string xml = ExecuteRequest("GET", "/ISAPI/System/Video/inputs/channels");
+                var doc = new XmlDocument();
+                doc.LoadXml(xml);
+                var chNodes = doc.GetElementsByTagName("VideoInputChannel");
+                foreach (XmlNode ch in chNodes)
                 {
-                    Id = id,
-                    Name = GetLocalTagText(ch, "name"),
-                    Enabled = enabledStr.Equals("true", StringComparison.OrdinalIgnoreCase)
-                });
+                    string idStr = GetLocalTagText(ch, "id");
+                    string enabledStr = GetLocalTagText(ch, "videoInputEnabled");
+                    int id = 0;
+                    int.TryParse(idStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out id);
+
+                    list.Add(new VideoChannel
+                    {
+                        Id = id,
+                        Name = GetLocalTagText(ch, "name"),
+                        Enabled = enabledStr.Equals("true", StringComparison.OrdinalIgnoreCase)
+                    });
+                }
             }
+            catch { }
+
+            // 2. NVR / Hybrid IP Digital Channels
+            try
+            {
+                string xml = ExecuteRequest("GET", "/ISAPI/ContentMgmt/InputProxy/channels");
+                var doc = new XmlDocument();
+                doc.LoadXml(xml);
+                var proxyNodes = doc.GetElementsByTagName("InputProxyChannel");
+                foreach (XmlNode ch in proxyNodes)
+                {
+                    string idStr = GetLocalTagText(ch, "id");
+                    int id = 0;
+                    int.TryParse(idStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out id);
+
+                    bool exists = false;
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        if (list[i].Id == id) { exists = true; break; }
+                    }
+                    if (!exists)
+                    {
+                        list.Add(new VideoChannel
+                        {
+                            Id = id,
+                            Name = GetLocalTagText(ch, "name"),
+                            Enabled = true
+                        });
+                    }
+                }
+            }
+            catch { }
+
             return list;
         }
 
@@ -205,8 +243,8 @@ namespace HikDvrSdk
         public List<RecordingSegment> SearchRecordings(int channelId, DateTime startTimeUtc, DateTime endTimeUtc, int maxResults = 500)
         {
             int trackId = channelId * 100 + 1;
-            string startStr = startTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
-            string endStr = endTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string startStr = startTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+            string endStr = endTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
 
             var list = new List<RecordingSegment>();
             int pos = 0;
@@ -216,6 +254,7 @@ namespace HikDvrSdk
             {
                 int currentBatch = Math.Min(pageSize, maxResults - pos);
                 string searchXml = string.Format(
+                    CultureInfo.InvariantCulture,
                     "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
                     "<CMSearchDescription>\n" +
                     "<searchID>C1C1C1C1-0000-0000-0000-000000000001</searchID>\n" +
@@ -244,7 +283,7 @@ namespace HikDvrSdk
                     long sizeBytes = 0;
                     var match = Regex.Match(uri, @"[?&]size=(\d+)");
                     if (match.Success)
-                        long.TryParse(match.Groups[1].Value, out sizeBytes);
+                        long.TryParse(match.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out sizeBytes);
 
                     if (!string.IsNullOrEmpty(uri))
                     {
@@ -267,27 +306,57 @@ namespace HikDvrSdk
             return list;
         }
 
-        public long DownloadRecording(string playbackUri, string destinationFilePath, Action<DownloadProgress> progressCallback = null)
+        public long DownloadRecording(string playbackUri, string destinationFilePath, Action<DownloadProgress> progressCallback = null, bool verifySize = true)
         {
+            long expectedSize = 0;
+            var sizeMatch = Regex.Match(playbackUri, @"[?&]size=(\d+)");
+            if (sizeMatch.Success)
+                long.TryParse(sizeMatch.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out expectedSize);
+
             string escapedUri = System.Security.SecurityElement.Escape(playbackUri);
             string dlXml = string.Format(
+                CultureInfo.InvariantCulture,
                 "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
                 "<downloadRequest version=\"1.0\" xmlns=\"http://urn:selfextension:psiaext-ver10-xsd\">\n" +
                 "<playbackURI>{0}</playbackURI>\n" +
                 "</downloadRequest>", escapedUri);
 
-            var req = CreateRequest("POST", "/ISAPI/ContentMgmt/download", "application/xml");
             byte[] bodyData = Encoding.UTF8.GetBytes(dlXml);
-            req.ContentLength = bodyData.Length;
-            using (var stream = req.GetRequestStream())
+            string[] paths = new string[] {
+                "/ISAPI/ContentMgmt/download",
+                "/PSIA/Custom/SelfExt/ContentMgmt/download"
+            };
+
+            HttpWebResponse resp = null;
+            foreach (string p in paths)
             {
-                stream.Write(bodyData, 0, bodyData.Length);
+                try
+                {
+                    var req = CreateRequest("POST", p, "application/xml");
+                    req.ContentLength = bodyData.Length;
+                    using (var stream = req.GetRequestStream())
+                    {
+                        stream.Write(bodyData, 0, bodyData.Length);
+                    }
+                    resp = (HttpWebResponse)req.GetResponse();
+                    break;
+                }
+                catch (WebException ex)
+                {
+                    var httpResp = ex.Response as HttpWebResponse;
+                    if (httpResp != null && ((int)httpResp.StatusCode == 404 || (int)httpResp.StatusCode == 405))
+                        continue;
+                    throw;
+                }
             }
+
+            if (resp == null)
+                throw new InvalidOperationException("DVR rejected download endpoints");
 
             long total = 0;
             var sw = Stopwatch.StartNew();
 
-            using (var resp = (HttpWebResponse)req.GetResponse())
+            using (resp)
             using (var inStream = resp.GetResponseStream())
             using (var outStream = new FileStream(destinationFilePath, FileMode.Create, FileAccess.Write, FileShare.None))
             {
@@ -309,6 +378,13 @@ namespace HikDvrSdk
                     }
                 }
             }
+
+            if (verifySize && expectedSize > 0 && total < expectedSize)
+            {
+                throw new IOException(string.Format(CultureInfo.InvariantCulture,
+                    "Download interrupted: received {0} bytes, expected {1} bytes", total, expectedSize));
+            }
+
             return total;
         }
 
@@ -331,8 +407,8 @@ namespace HikDvrSdk
                 }
 
                 string args = isImkh
-                    ? string.Format("-y -i \"{0}\" -c copy \"{1}\"", inputPsPath, outputMp4Path)
-                    : string.Format("-y -r {0} -i \"{1}\" -c copy \"{2}\"", fps, inputPsPath, outputMp4Path);
+                    ? string.Format(CultureInfo.InvariantCulture, "-y -i \"{0}\" -c copy \"{1}\" -loglevel error -nostats", inputPsPath, outputMp4Path)
+                    : string.Format(CultureInfo.InvariantCulture, "-y -r {0:F2} -i \"{1}\" -c copy \"{2}\" -loglevel error -nostats", fps, inputPsPath, outputMp4Path);
 
                 var psi = new ProcessStartInfo
                 {
@@ -341,11 +417,13 @@ namespace HikDvrSdk
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardError = true,
-                    RedirectStandardOutput = true
+                    RedirectStandardOutput = false
                 };
 
                 using (var p = Process.Start(psi))
                 {
+                    // Read stderr to avoid OS pipe deadlock
+                    string err = p.StandardError.ReadToEnd();
                     p.WaitForExit();
                     return p.ExitCode == 0;
                 }

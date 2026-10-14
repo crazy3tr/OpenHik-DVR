@@ -10,6 +10,9 @@ import sys
 import time
 import argparse
 from datetime import datetime, timedelta
+
+# Add parent python directory to module path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "python")))
 from pure_hik_client import PureHikClient, convert_to_mp4, DownloadIncompleteError
 
 def parse_args():
@@ -66,7 +69,7 @@ def main():
         print(f"\nScanning Channel {args.channel} records for {date_str}...")
 
         try:
-            segments = client.search_recordings(args.channel, start_t, end_t, max_results=100)
+            segments = client.search_recordings(args.channel, start_t, end_t, max_results=500)
         except Exception as e:
             print(f"  Search error: {e}")
             continue

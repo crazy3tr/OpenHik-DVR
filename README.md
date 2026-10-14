@@ -19,7 +19,7 @@ Hikvision DVRs, NVRs, and IP cameras are deployed by the millions worldwide. Tra
 3. **High-Speed Direct Downloads:** Pulls footage directly from internal DVR hard drive sectors at up to **25+ MB/s** on local networks and maximum line rate over the internet.
 4. **Instant Lossless MP4 Remuxing:** Packages raw Hikvision Program Streams (`IMKH` PS container) into standard MP4 files in milliseconds with `ffmpeg`.
 5. **Live JPEG Snapshot Grabbing:** Captures real-time camera frames over HTTP GET.
-6. **Full Telemetry & Hardware Control:** Read/write system clock, rename camera OSD channels, query S.M.A.R.T. HDD health, inspect CPU/RAM load, and manage motion detection.
+6. **Full Telemetry & Hardware Control:** Read/write system clock, rename camera OSD channels, query HDD status and storage capacity, inspect CPU load/uptime, and receive real-time motion detection push alerts.
 
 ---
 

@@ -14,6 +14,7 @@ import urllib.request
 import urllib.parse
 import json
 import uuid
+from datetime import datetime
 
 # Add parent directory so pure_hik_client can be imported
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "python")))
@@ -32,6 +33,11 @@ def send_telegram_photo(token: str, chat_id: str, photo_bytes: bytes, caption: s
     body.extend(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
     body.extend(f"{chat_id}\r\n".encode())
     
+    # parse_mode field (enables Markdown formatting for bold/italic captions)
+    body.extend(f"--{boundary}\r\n".encode())
+    body.extend(b'Content-Disposition: form-data; name="parse_mode"\r\n\r\n')
+    body.extend(b"Markdown\r\n")
+
     # caption field
     body.extend(f"--{boundary}\r\n".encode())
     body.extend(b'Content-Disposition: form-data; name="caption"\r\n\r\n')

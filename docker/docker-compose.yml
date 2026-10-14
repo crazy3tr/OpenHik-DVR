@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  # Service 1: Modern ActiveX-Free Web Dashboard (Chrome / Safari / iOS / Android)
+  openhik-dashboard:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: openhik-dashboard
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - DVR_HOST=192.168.1.100
+      - DVR_PORT=80
+      - DVR_USER=admin
+      - DVR_PASS=password123
+      - WEB_PORT=8080
+    command: >
+      python tools/web_dashboard.py
+      --host 192.168.1.100
+      --port 80
+      --user admin
+      --pass password123
+      --bind 0.0.0.0
+      --web-port 8080
+
+  # Service 2: Automated Turnkey Hard Disk Archiver & Daily Backup
+  openhik-backup:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: openhik-backup
+    restart: unless-stopped
+    volumes:
+      - ./recordings:/recordings
+    environment:
+      - DVR_HOST=192.168.1.100
+      - DVR_PORT=80
+      - DVR_USER=admin
+      - DVR_PASS=password123
+      - OUTPUT_DIR=/recordings
+    command: >
+      python tools/hik_backup.py
+      --host 192.168.1.100
+      --port 80
+      --user admin
+      --pass password123
+      --channel 1
+      --days 7
+      --out /recordings

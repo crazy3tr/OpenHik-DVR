@@ -1,0 +1,328 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Net;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Xml;
+
+namespace HikDvrSdk
+{
+    public class HikClient : IDisposable
+    {
+        private readonly string _host;
+        private readonly int _port;
+        private readonly string _user;
+        private readonly string _password;
+        private readonly string _baseUrl;
+        private readonly CredentialCache _credentialCache;
+
+        public HikClient(string host, int port = 80, string user = "admin", string password = "")
+        {
+            _host = host;
+            _port = port;
+            _user = user;
+            _password = password;
+            _baseUrl = string.Format("http://{0}:{1}", _host, _port);
+
+            _credentialCache = new CredentialCache();
+            _credentialCache.Add(new Uri(_baseUrl), "Digest", new NetworkCredential(_user, _password));
+        }
+
+        private HttpWebRequest CreateRequest(string method, string path, string contentType = null)
+        {
+            var req = (HttpWebRequest)WebRequest.Create(_baseUrl + path);
+            req.Method = method;
+            req.Credentials = _credentialCache;
+            req.UserAgent = "OpenHik-CSharp/1.0";
+            req.Timeout = 15000;
+            req.PreAuthenticate = false;
+            if (!string.IsNullOrEmpty(contentType))
+                req.ContentType = contentType;
+            return req;
+        }
+
+        private string ExecuteRequest(string method, string path, string xmlBody = null)
+        {
+            var req = CreateRequest(method, path, "application/xml");
+            if (!string.IsNullOrEmpty(xmlBody))
+            {
+                byte[] data = Encoding.UTF8.GetBytes(xmlBody);
+                req.ContentLength = data.Length;
+                using (var stream = req.GetRequestStream())
+                {
+                    stream.Write(data, 0, data.Length);
+                }
+            }
+
+            using (var resp = (HttpWebResponse)req.GetResponse())
+            using (var stream = resp.GetResponseStream())
+            using (var reader = new StreamReader(stream, Encoding.UTF8))
+            {
+                return reader.ReadToEnd();
+            }
+        }
+
+        private static string GetLocalTagText(XmlNode node, string localName)
+        {
+            if (node == null) return string.Empty;
+            foreach (XmlNode child in node.ChildNodes)
+            {
+                if (child.LocalName == localName)
+                    return child.InnerText.Trim();
+                string nested = GetLocalTagText(child, localName);
+                if (!string.IsNullOrEmpty(nested))
+                    return nested;
+            }
+            return string.Empty;
+        }
+
+        public DeviceInfo GetDeviceInfo()
+        {
+            string xml = ExecuteRequest("GET", "/ISAPI/System/deviceInfo");
+            var doc = new XmlDocument();
+            doc.LoadXml(xml);
+
+            return new DeviceInfo
+            {
+                Model = GetLocalTagText(doc.DocumentElement, "model"),
+                SerialNumber = GetLocalTagText(doc.DocumentElement, "serialNumber"),
+                FirmwareVersion = GetLocalTagText(doc.DocumentElement, "firmwareVersion"),
+                MacAddress = GetLocalTagText(doc.DocumentElement, "macAddress"),
+                DeviceType = GetLocalTagText(doc.DocumentElement, "deviceType"),
+                EncoderVersion = GetLocalTagText(doc.DocumentElement, "encoderVersion")
+            };
+        }
+
+        public DeviceStatus GetDeviceStatus()
+        {
+            string xml = ExecuteRequest("GET", "/ISAPI/System/status");
+            var doc = new XmlDocument();
+            doc.LoadXml(xml);
+
+            string uptimeStr = GetLocalTagText(doc.DocumentElement, "deviceUpTime");
+            string cpuStr = GetLocalTagText(doc.DocumentElement, "cpuUtilization");
+
+            int uptime = 0;
+            int.TryParse(uptimeStr, out uptime);
+
+            int cpu = 0;
+            int.TryParse(cpuStr, out cpu);
+
+            return new DeviceStatus
+            {
+                CurrentTime = GetLocalTagText(doc.DocumentElement, "currentDeviceTime"),
+                UptimeSeconds = uptime,
+                CpuUtilization = cpu
+            };
+        }
+
+        public List<DeviceStorage> GetStorage()
+        {
+            string xml = ExecuteRequest("GET", "/ISAPI/ContentMgmt/Storage");
+            var doc = new XmlDocument();
+            doc.LoadXml(xml);
+
+            var list = new List<DeviceStorage>();
+            var hddNodes = doc.GetElementsByTagName("hdd");
+            foreach (XmlNode hdd in hddNodes)
+            {
+                string capStr = GetLocalTagText(hdd, "capacity");
+                string freeStr = GetLocalTagText(hdd, "freeSpace");
+                long cap = 0, free = 0;
+                long.TryParse(capStr, out cap);
+                long.TryParse(freeStr, out free);
+
+                list.Add(new DeviceStorage
+                {
+                    Id = GetLocalTagText(hdd, "id"),
+                    Name = GetLocalTagText(hdd, "hddName"),
+                    Type = GetLocalTagText(hdd, "hddType"),
+                    Status = GetLocalTagText(hdd, "status"),
+                    CapacityMB = cap,
+                    FreeSpaceMB = free
+                });
+            }
+            return list;
+        }
+
+        public List<VideoChannel> GetVideoChannels()
+        {
+            string xml = ExecuteRequest("GET", "/ISAPI/System/Video/inputs/channels");
+            var doc = new XmlDocument();
+            doc.LoadXml(xml);
+
+            var list = new List<VideoChannel>();
+            var chNodes = doc.GetElementsByTagName("VideoInputChannel");
+            foreach (XmlNode ch in chNodes)
+            {
+                string idStr = GetLocalTagText(ch, "id");
+                string enabledStr = GetLocalTagText(ch, "videoInputEnabled");
+                int id = 0;
+                int.TryParse(idStr, out id);
+
+                list.Add(new VideoChannel
+                {
+                    Id = id,
+                    Name = GetLocalTagText(ch, "name"),
+                    Enabled = enabledStr.Equals("true", StringComparison.OrdinalIgnoreCase)
+                });
+            }
+            return list;
+        }
+
+        public byte[] GetSnapshot(int channelId, int streamIndex = 1)
+        {
+            int trackId = channelId * 100 + streamIndex;
+            string[] paths = new string[] {
+                string.Format("/ISAPI/Streaming/channels/{0}/picture", trackId),
+                string.Format("/ISAPI/Streaming/channels/{0}/picture", channelId)
+            };
+
+            foreach (string p in paths)
+            {
+                try
+                {
+                    var req = CreateRequest("GET", p);
+                    using (var resp = (HttpWebResponse)req.GetResponse())
+                    using (var ms = new MemoryStream())
+                    {
+                        resp.GetResponseStream().CopyTo(ms);
+                        byte[] data = ms.ToArray();
+                        if (data.Length > 2 && data[0] == 0xFF && data[1] == 0xD8)
+                            return data;
+                    }
+                }
+                catch
+                {
+                    continue;
+                }
+            }
+            return null;
+        }
+
+        public List<RecordingSegment> SearchRecordings(int channelId, DateTime startTimeUtc, DateTime endTimeUtc, int maxResults = 50)
+        {
+            int trackId = channelId * 100 + 1;
+            string startStr = startTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string endStr = endTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+            string searchXml = string.Format(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
+                "<CMSearchDescription>\n" +
+                "<searchID>C1C1C1C1-0000-0000-0000-000000000001</searchID>\n" +
+                "<trackList><trackID>{0}</trackID></trackList>\n" +
+                "<timeSpanList><timeSpan><startTime>{1}</startTime><endTime>{2}</endTime></timeSpan></timeSpanList>\n" +
+                "<maxResults>{3}</maxResults>\n" +
+                "<searchResultPostion>0</searchResultPostion>\n" +
+                "<metadataList><metadataDescriptor>//recordType.meta.std-cgi.com</metadataDescriptor></metadataList>\n" +
+                "</CMSearchDescription>", trackId, startStr, endStr, maxResults);
+
+            string xml = ExecuteRequest("POST", "/ISAPI/ContentMgmt/search", searchXml);
+            var doc = new XmlDocument();
+            doc.LoadXml(xml);
+
+            var list = new List<RecordingSegment>();
+            var itemNodes = doc.GetElementsByTagName("searchMatchItem");
+            foreach (XmlNode item in itemNodes)
+            {
+                string s = GetLocalTagText(item, "startTime");
+                string e = GetLocalTagText(item, "endTime");
+                string uri = GetLocalTagText(item, "playbackURI");
+
+                long sizeBytes = 0;
+                var match = Regex.Match(uri, @"[?&]size=(\d+)");
+                if (match.Success)
+                    long.TryParse(match.Groups[1].Value, out sizeBytes);
+
+                if (!string.IsNullOrEmpty(uri))
+                {
+                    list.Add(new RecordingSegment
+                    {
+                        TrackId = trackId,
+                        StartTime = s,
+                        EndTime = e,
+                        PlaybackUri = uri,
+                        SizeBytes = sizeBytes
+                    });
+                }
+            }
+            return list;
+        }
+
+        public long DownloadRecording(string playbackUri, string destinationFilePath, Action<DownloadProgress> progressCallback = null)
+        {
+            string dlXml = string.Format(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
+                "<downloadRequest version=\"1.0\" xmlns=\"http://urn:selfextension:psiaext-ver10-xsd\">\n" +
+                "<playbackURI>{0}</playbackURI>\n" +
+                "</downloadRequest>", playbackUri);
+
+            var req = CreateRequest("POST", "/ISAPI/ContentMgmt/download", "application/xml");
+            byte[] bodyData = Encoding.UTF8.GetBytes(dlXml);
+            req.ContentLength = bodyData.Length;
+            using (var stream = req.GetRequestStream())
+            {
+                stream.Write(bodyData, 0, bodyData.Length);
+            }
+
+            long total = 0;
+            var sw = Stopwatch.StartNew();
+
+            using (var resp = (HttpWebResponse)req.GetResponse())
+            using (var inStream = resp.GetResponseStream())
+            using (var outStream = new FileStream(destinationFilePath, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                byte[] buffer = new byte[256 * 1024];
+                int read;
+                while ((read = inStream.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    outStream.Write(buffer, 0, read);
+                    total += read;
+
+                    if (progressCallback != null)
+                    {
+                        double sec = Math.Max(0.001, sw.Elapsed.TotalSeconds);
+                        progressCallback(new DownloadProgress
+                        {
+                            BytesDownloaded = total,
+                            SpeedMBs = (total / (1024.0 * 1024.0)) / sec
+                        });
+                    }
+                }
+            }
+            return total;
+        }
+
+        public static bool ConvertToMp4(string inputPsPath, string outputMp4Path, string ffmpegPath = "ffmpeg")
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = ffmpegPath,
+                    Arguments = string.Format("-y -i \"{0}\" -c copy \"{1}\"", inputPsPath, outputMp4Path),
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardError = true,
+                    RedirectStandardOutput = true
+                };
+
+                using (var p = Process.Start(psi))
+                {
+                    p.WaitForExit();
+                    return p.ExitCode == 0;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+}

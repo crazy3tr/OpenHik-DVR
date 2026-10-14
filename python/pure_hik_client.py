@@ -7,9 +7,11 @@ Clean-room implementation of the Hikvision ISAPI (Intelligent Security API) over
 Supports both V3.x (std-cgi.com) and V4.x+ (hikvision.com) firmware generations.
 """
 
+from __future__ import annotations
 import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
 from datetime import datetime, timezone, timedelta
 import os
 import sys
@@ -19,6 +21,10 @@ import subprocess
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
+class DownloadIncompleteError(Exception):
+    """Raised when downloaded file size is less than the expected size in playbackURI."""
+    pass
 
 def _lname(tag: str) -> str:
     """Strips XML namespaces to ensure cross-firmware compatibility (e.g. {http://...}Tag -> Tag)."""
@@ -31,12 +37,29 @@ def _find_text(element: ET.Element, name: str) -> str:
             return child.text.strip()
     return ""
 
-def convert_to_mp4(input_path: str, output_mp4_path: str, ffmpeg_path: str = "ffmpeg") -> bool:
+def convert_to_mp4(input_path: str, output_mp4_path: str, fps: float = 25.0, ffmpeg_path: str = "ffmpeg") -> bool:
     """
     Losslessly remuxes Hikvision Program Stream ('IMKH' PS container) or H.264/H.265 raw streams
     into standard MP4 container without re-encoding using ffmpeg.
+    Automatically checks for 'IMKH' magic header; for raw elementary streams without PTS,
+    supplies '-r <fps>' before '-i' to avoid corrupted playback duration.
     """
-    cmd = [ffmpeg_path, "-y", "-i", input_path, "-c", "copy", output_mp4_path]
+    is_imkh = False
+    try:
+        with open(input_path, "rb") as f:
+            magic = f.read(4)
+            if magic == b'IMKH':
+                is_imkh = True
+    except Exception:
+        pass
+
+    if is_imkh:
+        cmd = [ffmpeg_path, "-y", "-i", input_path, "-c", "copy", output_mp4_path]
+    else:
+        # Raw elementary H.264/H.265 stream without container timestamps:
+        # Prepend framerate before input file so ffmpeg generates valid presentation timestamps.
+        cmd = [ffmpeg_path, "-y", "-r", str(fps), "-i", input_path, "-c", "copy", output_mp4_path]
+
     try:
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return res.returncode == 0
@@ -192,12 +215,23 @@ class PureHikClient:
             "timeZone": _find_text(root, "timeZone")
         }
 
-    def set_time(self, local_dt: datetime) -> bool:
+    def set_time(self, local_dt: datetime, tz_offset: str | None = None) -> bool:
         """
         Synchronizes hardware RTC time.
         Format: YYYY-MM-DDTHH:MM:SS+HH:MM (e.g. 2026-10-14T12:00:00+03:00)
+        If tz_offset is None, it is derived from local_dt.tzinfo or the local system timezone.
         """
-        tz_offset = "+03:00" # Standard Turkey/CST-3 offset
+        if tz_offset is None:
+            if local_dt.tzinfo is not None:
+                raw_z = local_dt.strftime("%z")
+                tz_offset = f"{raw_z[:3]}:{raw_z[3:]}" if raw_z else "+00:00"
+            else:
+                # Derive local system timezone offset dynamically
+                offset_sec = -time.timezone if (time.localtime().tm_isdst == 0) else -time.altzone
+                hours = int(offset_sec // 3600)
+                minutes = int((abs(offset_sec) % 3600) // 60)
+                tz_offset = f"{hours:+03d}:{minutes:02d}"
+
         time_str = local_dt.strftime("%Y-%m-%dT%H:%M:%S") + tz_offset
         xml_payload = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Time version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
@@ -246,11 +280,12 @@ class PureHikClient:
 
     def set_channel_name(self, channel_id: int, new_name: str) -> bool:
         """Updates OSD camera channel title."""
+        escaped_name = escape(new_name)
         xml_payload = f"""<?xml version="1.0" encoding="UTF-8"?>
 <VideoInputChannel version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
 <id>{channel_id}</id>
 <inputPort>{channel_id}</inputPort>
-<name>{new_name}</name>
+<name>{escaped_name}</name>
 <videoInputEnabled>true</videoInputEnabled>
 </VideoInputChannel>"""
         try:
@@ -300,54 +335,78 @@ class PureHikClient:
                 continue
         return None
 
-    def search_recordings(self, channel_id: int, start_time: datetime, end_time: datetime, stream_index: int = 1, max_results: int = 50) -> list[RecordingSegment]:
+    def search_recordings(self, channel_id: int, start_time: datetime, end_time: datetime, stream_index: int = 1, max_results: int = 500) -> list[RecordingSegment]:
         """
         Searches recordings stored on the DVR hard disk for a specific channel and time range.
+        Automatically handles pagination when results exceed device single-page limit.
         Times are formatted in ISO UTC: YYYY-MM-DDTHH:MM:SSZ
         """
         track_id = channel_id * 100 + stream_index
         start_str = start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_str = end_time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        search_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+        segments: list[RecordingSegment] = []
+        pos = 0
+        page_size = min(max_results, 100)
+
+        while pos < max_results:
+            current_batch = min(page_size, max_results - pos)
+            search_xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <CMSearchDescription>
 <searchID>C1C1C1C1-0000-0000-0000-000000000001</searchID>
 <trackList><trackID>{track_id}</trackID></trackList>
 <timeSpanList><timeSpan><startTime>{start_str}</startTime><endTime>{end_str}</endTime></timeSpan></timeSpanList>
-<maxResults>{max_results}</maxResults>
-<searchResultPostion>0</searchResultPostion>
+<maxResults>{current_batch}</maxResults>
+<searchResultPostion>{pos}</searchResultPostion>
 <metadataList><metadataDescriptor>//recordType.meta.std-cgi.com</metadataDescriptor></metadataList>
 </CMSearchDescription>"""
 
-        raw = self._request("POST", "/ISAPI/ContentMgmt/search", data=search_xml.encode('utf-8'), headers={'Content-Type': 'application/xml'})
-        root = ET.fromstring(raw)
-        segments = []
-        for it in root.iter():
-            if _lname(it.tag) == "searchMatchItem":
-                s = _find_text(it, "startTime")
-                e = _find_text(it, "endTime")
-                uri = _find_text(it, "playbackURI")
-                # Parse size parameter from playbackURI if present (e.g. &size=12345678)
-                size_match = re.search(r'[?&]size=(\d+)', uri)
-                sz = int(size_match.group(1)) if size_match else 0
-                if uri:
-                    segments.append(RecordingSegment(track_id, s, e, uri, sz))
+            raw = self._request("POST", "/ISAPI/ContentMgmt/search", data=search_xml.encode('utf-8'), headers={'Content-Type': 'application/xml'})
+            root = ET.fromstring(raw)
+            status_str = _find_text(root, "responseStatusStrg")
+
+            batch_items = []
+            for it in root.iter():
+                if _lname(it.tag) == "searchMatchItem":
+                    s = _find_text(it, "startTime")
+                    e = _find_text(it, "endTime")
+                    uri = _find_text(it, "playbackURI")
+                    size_match = re.search(r'[?&]size=(\d+)', uri)
+                    sz = int(size_match.group(1)) if size_match else 0
+                    if uri:
+                        batch_items.append(RecordingSegment(track_id, s, e, uri, sz))
+
+            if not batch_items:
+                break
+
+            segments.extend(batch_items)
+            pos += len(batch_items)
+
+            if status_str.upper() != "MORE":
+                break
+
         return segments
 
-    def download_recording(self, playback_uri: str, destination_path: str, progress_callback=None, limit_mbps: float = 0.0) -> int:
+    def download_recording(self, playback_uri: str, destination_path: str, progress_callback=None, limit_mbps: float = 0.0, verify_size: bool = True) -> int:
         """
         Downloads a recording directly from DVR hard drive over HTTP.
-        Supports progress callbacks and optional bandwidth limiting to prevent WAN congestion.
+        Supports progress callbacks, bandwidth limiting, and size integrity verification.
         Returns total bytes downloaded.
         """
+        # Parse expected size from playbackURI parameter if available (&size=123456)
+        expected_size = 0
+        size_match = re.search(r'[?&]size=(\d+)', playback_uri)
+        if size_match:
+            expected_size = int(size_match.group(1))
+
+        escaped_uri = escape(playback_uri)
         dl_xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <downloadRequest version="1.0" xmlns="http://urn:selfextension:psiaext-ver10-xsd">
-<playbackURI>{playback_uri}</playbackURI>
+<playbackURI>{escaped_uri}</playbackURI>
 </downloadRequest>"""
 
         paths = ["/ISAPI/ContentMgmt/download", "/PSIA/Custom/SelfExt/ContentMgmt/download"]
-        url = None
-        req = None
+        resp = None
         for p in paths:
             try:
                 test_req = urllib.request.Request(
@@ -355,15 +414,14 @@ class PureHikClient:
                     data=dl_xml.encode('utf-8'),
                     headers={'Content-Type': 'application/xml', 'User-Agent': 'OpenHik-Client/1.0'}
                 )
-                resp = self.opener.open(test_req, timeout=self.timeout)
-                req = test_req
+                resp = self.opener.open(test_req, timeout=max(self.timeout, 30.0))
                 break
             except urllib.error.HTTPError as e:
                 if e.code in (404, 405):
                     continue
                 raise
 
-        if not resp:
+        if resp is None:
             raise ConnectionError("DVR did not accept download endpoint")
 
         total_downloaded = 0
@@ -389,6 +447,11 @@ class PureHikClient:
                     speed_mbs = (total_downloaded / (1024.0 * 1024.0)) / elapsed
                     progress_callback(total_downloaded, speed_mbs)
 
+        if verify_size and expected_size > 0 and total_downloaded < expected_size:
+            raise DownloadIncompleteError(
+                f"Download interrupted: received {total_downloaded} bytes, expected {expected_size} bytes"
+            )
+
         return total_downloaded
 
     def get_rtsp_url(self, channel_id: int, stream_index: int = 1, rtsp_port: int = 554) -> str:
@@ -406,7 +469,8 @@ class PureHikClient:
         """
         Listens to real-time event alerts from /ISAPI/Event/notification/alertStream over HTTP.
         Dispatches EventAlert objects to callback whenever motion, tampering, or alarms trigger.
-        Automatically reconnects if the connection drops.
+        Automatically reconnects on network drop; halts immediately on authentication failure (401/403)
+        to prevent hardware account lockout.
         """
         while stop_event is None or not stop_event.is_set():
             try:
@@ -440,6 +504,12 @@ class PureHikClient:
                             buf = b""
                         else:
                             buf += line
+            except urllib.error.HTTPError as e:
+                if e.code in (401, 403):
+                    raise PermissionError(f"Authentication failed on alertStream (HTTP {e.code}). Aborting to prevent device lockout.")
+                if stop_event is not None and stop_event.is_set():
+                    break
+                time.sleep(retry_delay)
             except Exception:
                 if stop_event is not None and stop_event.is_set():
                     break

@@ -202,62 +202,79 @@ namespace HikDvrSdk
             return null;
         }
 
-        public List<RecordingSegment> SearchRecordings(int channelId, DateTime startTimeUtc, DateTime endTimeUtc, int maxResults = 50)
+        public List<RecordingSegment> SearchRecordings(int channelId, DateTime startTimeUtc, DateTime endTimeUtc, int maxResults = 500)
         {
             int trackId = channelId * 100 + 1;
             string startStr = startTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
             string endStr = endTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-            string searchXml = string.Format(
-                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
-                "<CMSearchDescription>\n" +
-                "<searchID>C1C1C1C1-0000-0000-0000-000000000001</searchID>\n" +
-                "<trackList><trackID>{0}</trackID></trackList>\n" +
-                "<timeSpanList><timeSpan><startTime>{1}</startTime><endTime>{2}</endTime></timeSpan></timeSpanList>\n" +
-                "<maxResults>{3}</maxResults>\n" +
-                "<searchResultPostion>0</searchResultPostion>\n" +
-                "<metadataList><metadataDescriptor>//recordType.meta.std-cgi.com</metadataDescriptor></metadataList>\n" +
-                "</CMSearchDescription>", trackId, startStr, endStr, maxResults);
-
-            string xml = ExecuteRequest("POST", "/ISAPI/ContentMgmt/search", searchXml);
-            var doc = new XmlDocument();
-            doc.LoadXml(xml);
-
             var list = new List<RecordingSegment>();
-            var itemNodes = doc.GetElementsByTagName("searchMatchItem");
-            foreach (XmlNode item in itemNodes)
+            int pos = 0;
+            int pageSize = Math.Min(maxResults, 100);
+
+            while (pos < maxResults)
             {
-                string s = GetLocalTagText(item, "startTime");
-                string e = GetLocalTagText(item, "endTime");
-                string uri = GetLocalTagText(item, "playbackURI");
+                int currentBatch = Math.Min(pageSize, maxResults - pos);
+                string searchXml = string.Format(
+                    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
+                    "<CMSearchDescription>\n" +
+                    "<searchID>C1C1C1C1-0000-0000-0000-000000000001</searchID>\n" +
+                    "<trackList><trackID>{0}</trackID></trackList>\n" +
+                    "<timeSpanList><timeSpan><startTime>{1}</startTime><endTime>{2}</endTime></timeSpan></timeSpanList>\n" +
+                    "<maxResults>{3}</maxResults>\n" +
+                    "<searchResultPostion>{4}</searchResultPostion>\n" +
+                    "<metadataList><metadataDescriptor>//recordType.meta.std-cgi.com</metadataDescriptor></metadataList>\n" +
+                    "</CMSearchDescription>", trackId, startStr, endStr, currentBatch, pos);
 
-                long sizeBytes = 0;
-                var match = Regex.Match(uri, @"[?&]size=(\d+)");
-                if (match.Success)
-                    long.TryParse(match.Groups[1].Value, out sizeBytes);
+                string xml = ExecuteRequest("POST", "/ISAPI/ContentMgmt/search", searchXml);
+                var doc = new XmlDocument();
+                doc.LoadXml(xml);
 
-                if (!string.IsNullOrEmpty(uri))
+                string status = GetLocalTagText(doc.DocumentElement, "responseStatusStrg");
+                var itemNodes = doc.GetElementsByTagName("searchMatchItem");
+                if (itemNodes.Count == 0)
+                    break;
+
+                foreach (XmlNode item in itemNodes)
                 {
-                    list.Add(new RecordingSegment
+                    string s = GetLocalTagText(item, "startTime");
+                    string e = GetLocalTagText(item, "endTime");
+                    string uri = GetLocalTagText(item, "playbackURI");
+
+                    long sizeBytes = 0;
+                    var match = Regex.Match(uri, @"[?&]size=(\d+)");
+                    if (match.Success)
+                        long.TryParse(match.Groups[1].Value, out sizeBytes);
+
+                    if (!string.IsNullOrEmpty(uri))
                     {
-                        TrackId = trackId,
-                        StartTime = s,
-                        EndTime = e,
-                        PlaybackUri = uri,
-                        SizeBytes = sizeBytes
-                    });
+                        list.Add(new RecordingSegment
+                        {
+                            TrackId = trackId,
+                            StartTime = s,
+                            EndTime = e,
+                            PlaybackUri = uri,
+                            SizeBytes = sizeBytes
+                        });
+                    }
                 }
+
+                pos += itemNodes.Count;
+                if (!status.Equals("MORE", StringComparison.OrdinalIgnoreCase))
+                    break;
             }
+
             return list;
         }
 
         public long DownloadRecording(string playbackUri, string destinationFilePath, Action<DownloadProgress> progressCallback = null)
         {
+            string escapedUri = System.Security.SecurityElement.Escape(playbackUri);
             string dlXml = string.Format(
                 "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
                 "<downloadRequest version=\"1.0\" xmlns=\"http://urn:selfextension:psiaext-ver10-xsd\">\n" +
                 "<playbackURI>{0}</playbackURI>\n" +
-                "</downloadRequest>", playbackUri);
+                "</downloadRequest>", escapedUri);
 
             var req = CreateRequest("POST", "/ISAPI/ContentMgmt/download", "application/xml");
             byte[] bodyData = Encoding.UTF8.GetBytes(dlXml);
@@ -295,14 +312,32 @@ namespace HikDvrSdk
             return total;
         }
 
-        public static bool ConvertToMp4(string inputPsPath, string outputMp4Path, string ffmpegPath = "ffmpeg")
+        public static bool ConvertToMp4(string inputPsPath, string outputMp4Path, double fps = 25.0, string ffmpegPath = "ffmpeg")
         {
             try
             {
+                bool isImkh = false;
+                if (File.Exists(inputPsPath))
+                {
+                    using (var fs = new FileStream(inputPsPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    {
+                        byte[] magic = new byte[4];
+                        if (fs.Read(magic, 0, 4) == 4)
+                        {
+                            if (magic[0] == 0x49 && magic[1] == 0x4D && magic[2] == 0x4B && magic[3] == 0x48)
+                                isImkh = true;
+                        }
+                    }
+                }
+
+                string args = isImkh
+                    ? string.Format("-y -i \"{0}\" -c copy \"{1}\"", inputPsPath, outputMp4Path)
+                    : string.Format("-y -r {0} -i \"{1}\" -c copy \"{2}\"", fps, inputPsPath, outputMp4Path);
+
                 var psi = new ProcessStartInfo
                 {
                     FileName = ffmpegPath,
-                    Arguments = string.Format("-y -i \"{0}\" -c copy \"{1}\"", inputPsPath, outputMp4Path),
+                    Arguments = args,
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardError = true,

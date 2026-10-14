@@ -10,6 +10,7 @@ Exit Codes:
   2 = CRITICAL (Disk failure, disk full/offline, or total recording stoppage)
 """
 
+from __future__ import annotations
 import sys
 import os
 import argparse

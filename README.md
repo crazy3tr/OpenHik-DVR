@@ -50,7 +50,7 @@ graph TD
 
 ## 🚀 Quick Start (Python - Zero Dependencies)
 
-Runs on Python 3.6+ across Windows, Linux, macOS, Android (Termux/Kivy), and Raspberry Pi:
+Runs on Python 3.7+ across Windows, Linux, macOS, Android (Termux/Kivy), and Raspberry Pi:
 
 ```python
 from datetime import datetime, timedelta
@@ -142,7 +142,7 @@ class Program
 
 ## 🛠️ Turnkey Tools Suite (`tools/`)
 
-All tools run with **zero third-party dependencies** using standard Python 3.6+:
+All tools run with **zero third-party dependencies** using standard Python 3.7+:
 
 ### 1. Modern ActiveX-Free Web Dashboard (`tools/web_dashboard.py`)
 Launches a local, responsive dark-themed HTML5 web console. View all 16 cameras simultaneously with live auto-refreshing snapshots, search recordings, and download MP4 files from Chrome, Safari, iPhone, Android, and Edge without legacy ActiveX plugins:
@@ -177,6 +177,15 @@ python tools/hik_backup.py --host 192.168.1.100 --user admin --pass mypass --cha
 # Download footage over a WAN connection with a 15 Mbps rate limit
 python tools/hik_backup.py --host 198.51.100.25 --port 8080 --channel 1 --limit-mbps 15.0
 ```
+
+---
+
+## ⚡ Concurrency & Hardware Limits
+
+Embedded DVR/NVR hardware operates on specialized DSP/SoC architectures with strict concurrency limits:
+* **Playback & Download Slots:** Most embedded Hikvision DVRs allocate between 1 and 4 concurrent playback/download channels. Running simultaneous parallel downloads across multiple workers can exhaust hardware slots and cause HTTP 503 Service Unavailable or connection resets.
+* **Sequential Processing Recommended:** `tools/hik_backup.py` deliberately downloads recording segments sequentially to ensure maximum sustained throughput and avoid stream starvation.
+* **Bandwidth Throttling:** When archiving over WAN connections, use `--limit-mbps` to prevent saturating the DVR's uplink, which could otherwise degrade live camera feeds and mobile app responsiveness.
 
 ---
 

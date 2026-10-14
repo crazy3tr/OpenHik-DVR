@@ -5,12 +5,14 @@ Runs a lightweight local web server that restores browser viewing and playback f
 browsers (Chrome, Firefox, Safari, Edge, iPhone, Android) without ActiveX plugins.
 """
 
+from __future__ import annotations
 import sys
 import os
 import time
 import argparse
 import json
 import urllib.parse
+from xml.sax.saxutils import escape
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 
@@ -378,9 +380,10 @@ class DashboardServer(BaseHTTPRequestHandler):
                 return
 
             try:
+                esc_uri = escape(uri)
                 dl_xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <downloadRequest version="1.0" xmlns="http://urn:selfextension:psiaext-ver10-xsd">
-<playbackURI>{uri}</playbackURI>
+<playbackURI>{esc_uri}</playbackURI>
 </downloadRequest>"""
                 paths = ["/ISAPI/ContentMgmt/download", "/PSIA/Custom/SelfExt/ContentMgmt/download"]
                 resp = None

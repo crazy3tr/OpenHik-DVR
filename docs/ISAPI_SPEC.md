@@ -76,7 +76,7 @@ $$\text{TrackID} = (\text{ChannelIndex} \times 100) + \text{StreamProfile}$$
 
 ## 5. Recording Catalog Search (`CMSearchDescription`)
 
-Searches the DVR hard disk for historical recorded segments within a UTC time window:
+Searches the DVR hard disk for historical recorded segments within a UTC or local time window:
 
 - **Method:** `POST /ISAPI/ContentMgmt/search`
 - **Request Payload:**
@@ -101,7 +101,14 @@ Searches the DVR hard disk for historical recorded segments within a UTC time wi
 </CMSearchDescription>
 ```
 
-- **Response Payload:** Contains `<searchMatchItem>` blocks with `<startTime>`, `<endTime>`, and `<playbackURI>`.
+### Result Pagination:
+When a query matches more records than the requested `maxResults` page limit:
+* The DVR response includes `<responseStatusStrg>MORE</responseStatusStrg>` (or `OK` on the final page).
+* To fetch subsequent segments, increment `<searchResultPostion>` by the number of segments already retrieved (e.g. `0`, then `50`, `100`, etc.) until `<responseStatusStrg>` is no longer `MORE` or zero items are returned.
+
+### Firmware Timezone Nuance:
+* **Modern Firmware (V4.x+):** Accurately evaluates the `Z` suffix as UTC (Zulu time) and queries footage adjusted by the device's configured timezone offset.
+* **Classic Firmware (V3.x):** Ignores the `Z` ISO suffix and treats the date/time string literally as the DVR's local clock time. When writing universal search routines across multiple hardware generations, keep this variance in mind.
 
 ---
 
@@ -114,9 +121,13 @@ Downloads recorded video segments directly from internal storage sectors over HT
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
 <downloadRequest version="1.0" xmlns="http://urn:selfextension:psiaext-ver10-xsd">
-    <playbackURI>rtsp://192.168.1.100:554/Streaming/tracks/101/?starttime=20261014T000000Z&endtime=20261014T010000Z&size=51162988</playbackURI>
+    <playbackURI>rtsp://192.168.1.100:554/Streaming/tracks/101/?starttime=20261014T000000Z&amp;endtime=20261014T010000Z&amp;size=51162988</playbackURI>
 </downloadRequest>
 ```
+
+### Critical XML Entity Escaping:
+The `playbackURI` returned from the search catalog contains query string separators (`&endtime=...&size=...`).
+In strict XML parsers, unescaped `&` characters constitute an XML syntax error. The URI **must** be escaped (`&` &rarr; `&amp;`) before wrapping it in the `<downloadRequest>` XML payload.
 
 - **Throughput:**
   - **LAN (Gigabit/Fast Ethernet):** Up to **25+ MB/s** (~200 Mbps).
@@ -124,14 +135,29 @@ Downloads recorded video segments directly from internal storage sectors over HT
 
 ---
 
-## 7. Media Container (`IMKH` Program Stream) & MP4 Remuxing
+## 7. Media Container (`IMKH` Program Stream) vs. Raw Streams
 
-Downloaded footage arrives packaged in Hikvision's Program Stream container:
+Downloaded footage arrives packaged in Hikvision's Program Stream container or as raw elementary video:
 * **Magic Header (Bytes 0..3):** `0x49 0x4D 0x4B 0x48` (`IMKH`)
 * **Payload:** Multiplexed PES packets containing H.264 or H.265 video frames and G.711 audio.
 
-### Instant Lossless Remuxing to MP4:
-```bash
-ffmpeg -y -i input.ps -c copy output.mp4
-```
-Because the stream contains complete PES presentation timestamps (PTS), FFmpeg instantly demuxes the `IMKH` container and packages it into a playable `.mp4` file in milliseconds without re-encoding.
+### Instant Lossless Remuxing with FFmpeg:
+1. **IMKH Program Streams (Standard):**
+   Because the stream contains complete PES presentation timestamps (PTS), FFmpeg demuxes the container without re-encoding:
+   ```bash
+   ffmpeg -y -i input.ps -c copy output.mp4
+   ```
+2. **Raw Elementary Streams (`.h264` / `.h265` without PTS):**
+   If the magic header is absent and the file contains raw elementary NAL units, FFmpeg must be provided with the input framerate (`-r <fps>`) before the `-i` parameter to avoid corrupted video duration (e.g. 2-second playback length):
+   ```bash
+   ffmpeg -y -r 25 -i input.raw -c copy output.mp4
+   ```
+
+---
+
+## 8. Hardware Concurrency & Playback Slot Limits
+
+Embedded DVR/NVR hardware enforces strict limits on concurrent decoding, playback, and export operations:
+* **Playback Slot Allocation:** Typical DVRs allocate 1 to 4 concurrent playback slots across all network users. Attempting parallel downloads across dozens of threads can lock the device's internal streaming daemon and return `HTTP 503` or connection timeouts.
+* **Sequential Download Architecture:** Client tools and backup scripts should queue recording segment downloads sequentially.
+* **Authentication Lockout Guard:** ISAPI alert streaming listeners must immediately terminate reconnection attempts upon receiving `HTTP 401 Unauthorized` or `HTTP 403 Forbidden` to prevent triggering automated IP/user lockout mechanisms.

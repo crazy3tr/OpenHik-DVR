@@ -4,12 +4,13 @@ OpenHik-DVR - Automated Multi-Channel Backup & Archiving Utility
 Downloads footage directly from Hikvision DVR hard disks via HTTP ISAPI and remuxes to MP4.
 """
 
+from __future__ import annotations
 import os
 import sys
 import time
 import argparse
 from datetime import datetime, timedelta
-from pure_hik_client import PureHikClient, convert_to_mp4
+from pure_hik_client import PureHikClient, convert_to_mp4, DownloadIncompleteError
 
 def parse_args():
     parser = argparse.ArgumentParser(description="OpenHik-DVR - Turnkey Archiver & Backup Tool")
@@ -104,7 +105,7 @@ def main():
 
             try:
                 t0 = time.time()
-                bytes_dl = client.download_recording(seg.playback_uri, raw_path, progress_callback=progress, limit_mbps=args.limit_mbps)
+                bytes_dl = client.download_recording(seg.playback_uri, raw_path, progress_callback=progress, limit_mbps=args.limit_mbps, verify_size=True)
                 elapsed = max(0.001, time.time() - t0)
                 print(f"\n     Finished in {elapsed:.1f}s (Avg: {bytes_dl/(1024*1024)/elapsed:.2f} MB/s)")
 
@@ -116,7 +117,9 @@ def main():
                     if not args.keep_raw and os.path.exists(raw_path):
                         os.remove(raw_path)
                 else:
-                    print("     [WARNING] FFmpeg remux failed, keeping raw .ps file.")
+                    print("     [WARNING] FFmpeg remux failed, keeping raw stream file.")
+            except DownloadIncompleteError as e:
+                print(f"\n     [WARNING] Incomplete download: {e}")
             except Exception as e:
                 print(f"\n     Download failed: {e}")
 

@@ -5,6 +5,7 @@ Listens for real-time motion detection events, captures full-res snapshots, and 
 instant photo alerts directly to Telegram or custom Webhook endpoints.
 """
 
+from __future__ import annotations
 import sys
 import os
 import time

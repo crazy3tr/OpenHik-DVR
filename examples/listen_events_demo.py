@@ -4,6 +4,7 @@ OpenHik-DVR - Real-Time Event Listener Example
 Listens to live push events (motion detection, tampering, video loss) via ISAPI alertStream.
 """
 
+from __future__ import annotations
 import sys
 import os
 import signal

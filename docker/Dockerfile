@@ -22,9 +22,10 @@ ENV WEB_PORT="8080"
 ENV BACKUP_CHANNEL="1"
 ENV BACKUP_DAYS="1"
 ENV OUTPUT_DIR="/recordings"
+ENV DASHBOARD_AUTH=""
 
 # Web Dashboard Port
 EXPOSE 8080
 
 # Default command: launch the ActiveX-free modern Web Dashboard using ENV parameters
-CMD ["sh", "-c", "python tools/web_dashboard.py --host \"$DVR_HOST\" --port \"$DVR_PORT\" --user \"$DVR_USER\" --pass \"$DVR_PASS\" --bind 0.0.0.0 --web-port \"$WEB_PORT\""]
+CMD ["sh", "-c", "AUTH_OPT=''; if [ -n \"$DASHBOARD_AUTH\" ]; then AUTH_OPT=\"--auth $DASHBOARD_AUTH\"; fi; python tools/web_dashboard.py --host \"$DVR_HOST\" --port \"$DVR_PORT\" --user \"$DVR_USER\" --pass \"$DVR_PASS\" --bind 0.0.0.0 --web-port \"$WEB_PORT\" $AUTH_OPT"]

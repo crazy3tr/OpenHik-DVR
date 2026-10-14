@@ -16,14 +16,16 @@ services:
       - DVR_USER=admin
       - DVR_PASS=password123
       - WEB_PORT=8080
+      - DASHBOARD_AUTH=admin:secret
     command: >
-      sh -c "python tools/web_dashboard.py
+      sh -c "AUTH_FLAG=''; if [ -n \"$$DASHBOARD_AUTH\" ]; then AUTH_FLAG=\"--auth $$DASHBOARD_AUTH\"; fi;
+      python tools/web_dashboard.py
       --host $$DVR_HOST
       --port $$DVR_PORT
       --user $$DVR_USER
       --pass \"$$DVR_PASS\"
       --bind 0.0.0.0
-      --web-port $$WEB_PORT"
+      --web-port $$WEB_PORT $$AUTH_FLAG"
 
   # Service 2: Automated Turnkey Hard Disk Archiver & Backup Job
   openhik-backup:

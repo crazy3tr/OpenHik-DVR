@@ -467,7 +467,7 @@ def parse_args():
     parser.add_argument("--pass", dest="password", default="", help="Password")
     parser.add_argument("--bind", default="127.0.0.1", help="Web dashboard bind IP (default: 127.0.0.1 for local security)")
     parser.add_argument("--web-port", type=int, default=8080, help="Web dashboard port (default: 8080)")
-    parser.add_argument("--auth", help="Optional dashboard Basic Auth credentials in 'username:password' format")
+    parser.add_argument("--auth", default=os.environ.get("DASHBOARD_AUTH"), help="Optional dashboard Basic Auth credentials in 'username:password' format (or set via DASHBOARD_AUTH env var)")
     return parser.parse_args()
 
 def main():
@@ -486,6 +486,9 @@ def main():
     print(f"Web Dashboard  : http://{args.bind}:{args.web_port}")
     if args.auth:
         print("Authentication : ENABLED (Basic Auth)")
+    elif args.bind in ("0.0.0.0", "::"):
+        print("WARNING        : Bound to all interfaces (0.0.0.0) without authentication!")
+        print("                 Set --auth username:password or DASHBOARD_AUTH env var to secure.")
     print("Multi-Threaded : ACTIVE (Concurrent downloads & live snapshots)")
     print("Zero ActiveX / Works in Chrome, Edge, Safari, iOS, Android")
     print("==================================================")

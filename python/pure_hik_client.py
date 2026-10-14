@@ -101,13 +101,14 @@ class DeviceStorage:
         return f"<DeviceStorage {self.name} status={self.status} capacity={self.capacity_gb:.1f}GB>"
 
 class VideoChannel:
-    def __init__(self, channel_id: int, name: str, enabled: bool):
+    def __init__(self, channel_id: int, name: str, enabled: bool, channel_type: str = "analog"):
         self.channel_id = channel_id
         self.name = name
         self.enabled = enabled
+        self.channel_type = channel_type
 
     def __repr__(self):
-        return f"<VideoChannel id={self.channel_id} name='{self.name}' enabled={self.enabled}>"
+        return f"<VideoChannel id={self.channel_id} type={self.channel_type} name='{self.name}' enabled={self.enabled}>"
 
 class StreamChannel:
     def __init__(self, stream_id: str, name: str, width: int, height: int, codec: str, fps: float):
@@ -266,8 +267,14 @@ class PureHikClient:
         return storages
 
     def get_video_channels(self) -> list[VideoChannel]:
-        """Lists all camera input channels (analog inputs and NVR IP proxy channels)."""
+        """
+        Lists all camera input channels (analog inputs and NVR IP proxy channels).
+        Properly handles hybrid DVRs where IP proxy channels coexist with analog channels.
+        Raises on authentication failures (401/403) and network errors.
+        """
         channels: list[VideoChannel] = []
+        analog_err = None
+
         # 1. Analog / Direct Video Input Channels
         try:
             raw = self._request("GET", "/ISAPI/System/Video/inputs/channels")
@@ -278,10 +285,17 @@ class PureHikClient:
                     channels.append(VideoChannel(
                         channel_id=int(cid) if cid.isdigit() else 0,
                         name=_find_text(ch, "name"),
-                        enabled=_find_text(ch, "videoInputEnabled").lower() == "true"
+                        enabled=_find_text(ch, "videoInputEnabled").lower() == "true",
+                        channel_type="analog"
                     ))
-        except Exception:
-            pass
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise
+            analog_err = e
+        except (ConnectionError, socket.error):
+            raise
+        except Exception as e:
+            analog_err = e
 
         # 2. Digital / IP Proxy Channels (on NVRs and hybrid DVRs)
         try:
@@ -291,14 +305,22 @@ class PureHikClient:
                 if _lname(ch.tag) == "InputProxyChannel":
                     cid = _find_text(ch, "id")
                     int_cid = int(cid) if cid.isdigit() else 0
-                    if not any(c.channel_id == int_cid for c in channels):
-                        channels.append(VideoChannel(
-                            channel_id=int_cid,
-                            name=_find_text(ch, "name"),
-                            enabled=True
-                        ))
+                    channels.append(VideoChannel(
+                        channel_id=int_cid,
+                        name=_find_text(ch, "name"),
+                        enabled=True,
+                        channel_type="ip"
+                    ))
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise
+            if analog_err and not channels:
+                raise analog_err
+        except (ConnectionError, socket.error):
+            raise
         except Exception:
-            pass
+            if analog_err and not channels:
+                raise analog_err
 
         return channels
 
@@ -363,7 +385,11 @@ class PureHikClient:
         """
         Searches recordings stored on the DVR hard disk for a specific channel and time range.
         Automatically handles pagination when results exceed device single-page limit.
-        Times are formatted in ISO UTC: YYYY-MM-DDTHH:MM:SSZ
+        
+        NOTE ON TIMEZONES:
+        Hikvision embedded firmware indexes recordings using the DVR internal local clock,
+        formatting index entries with a trailing 'Z'. Therefore, pass device local time
+        (e.g., datetime.now() or datetime(YYYY, MM, DD, HH, MM, SS)).
         """
         track_id = channel_id * 100 + stream_index
         start_str = start_time.strftime("%Y-%m-%dT%H:%M:%SZ")

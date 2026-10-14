@@ -14,6 +14,7 @@ import urllib.request
 import urllib.parse
 import json
 import uuid
+import html
 from datetime import datetime
 
 # Add parent directory so pure_hik_client can be imported
@@ -33,15 +34,16 @@ def send_telegram_photo(token: str, chat_id: str, photo_bytes: bytes, caption: s
     body.extend(b'Content-Disposition: form-data; name="chat_id"\r\n\r\n')
     body.extend(f"{chat_id}\r\n".encode())
     
-    # parse_mode field (enables Markdown formatting for bold/italic captions)
+    # parse_mode field (enables HTML formatting for reliable captions)
     body.extend(f"--{boundary}\r\n".encode())
     body.extend(b'Content-Disposition: form-data; name="parse_mode"\r\n\r\n')
-    body.extend(b"Markdown\r\n")
+    body.extend(b"HTML\r\n")
 
     # caption field
     body.extend(f"--{boundary}\r\n".encode())
     body.extend(b'Content-Disposition: form-data; name="caption"\r\n\r\n')
-    body.extend(f"{caption}\r\n".encode())
+    body.extend(caption.encode('utf-8'))
+    body.extend(b"\r\n")
     
     # photo file field
     body.extend(f"--{boundary}\r\n".encode())
@@ -161,7 +163,9 @@ def main():
 
             # Send Telegram photo
             if args.telegram_token and args.telegram_chat_id:
-                caption = f"🚨 *Motion Alert!*\n\n📷 *Camera:* Channel {ev.channel_id:02d}\n⏰ *Time:* {ev.date_time}\n📝 *Event:* {ev.description}"
+                esc_desc = html.escape(ev.description)
+                esc_time = html.escape(ev.date_time)
+                caption = f"🚨 <b>Motion Alert!</b>\n\n📷 <b>Camera:</b> Channel {ev.channel_id:02d}\n⏰ <b>Time:</b> {esc_time}\n📝 <b>Event:</b> {esc_desc}"
                 print("   Dispatching Telegram photo alert...")
                 ok = send_telegram_photo(args.telegram_token, args.telegram_chat_id, snap, caption)
                 if ok:

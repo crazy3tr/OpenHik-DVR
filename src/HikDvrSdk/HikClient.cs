@@ -240,11 +240,16 @@ namespace HikDvrSdk
             return null;
         }
 
-        public List<RecordingSegment> SearchRecordings(int channelId, DateTime startTimeUtc, DateTime endTimeUtc, int maxResults = 500)
+        /// <summary>
+        /// Searches recordings stored on the DVR hard disk for a specific channel and time range.
+        /// Note: Hikvision firmware indexes recordings using device local time (formatted with 'Z').
+        /// Pass device local time (e.g. DateTime.Now or local DateTime).
+        /// </summary>
+        public List<RecordingSegment> SearchRecordings(int channelId, DateTime startTime, DateTime endTime, int maxResults = 500)
         {
             int trackId = channelId * 100 + 1;
-            string startStr = startTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
-            string endStr = endTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+            string startStr = startTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+            string endStr = endTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
 
             var list = new List<RecordingSegment>();
             int pos = 0;
@@ -420,12 +425,20 @@ namespace HikDvrSdk
                     RedirectStandardOutput = false
                 };
 
-                using (var p = Process.Start(psi))
+                using (var p = new Process())
                 {
-                    // Read stderr to avoid OS pipe deadlock
-                    string err = p.StandardError.ReadToEnd();
-                    p.WaitForExit();
-                    return p.ExitCode == 0;
+                    p.StartInfo = psi;
+                    p.ErrorDataReceived += (s, e) => { };
+                    p.Start();
+                    p.BeginErrorReadLine();
+
+                    bool exited = p.WaitForExit(60000);
+                    if (!exited)
+                    {
+                        try { p.Kill(); } catch { }
+                        return false;
+                    }
+                    return p.ExitCode == 0 && File.Exists(outputMp4Path) && new FileInfo(outputMp4Path).Length > 1024;
                 }
             }
             catch

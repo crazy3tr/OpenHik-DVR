@@ -121,8 +121,8 @@ class Program
             var info = client.GetDeviceInfo();
             Console.WriteLine("Connected to: " + info.Model);
 
-            // Search today's recordings on Channel 1
-            var files = client.SearchRecordings(channelId: 1, DateTime.UtcNow.AddHours(-2), DateTime.UtcNow);
+            // Search today's recordings on Channel 1 (uses DVR local clock)
+            var files = client.SearchRecordings(channelId: 1, DateTime.Now.AddHours(-2), DateTime.Now);
             
             if (files.Count > 0)
             {

@@ -8,6 +8,7 @@ Supports both V3.x (std-cgi.com) and V4.x+ (hikvision.com) firmware generations.
 """
 
 from __future__ import annotations
+import socket
 import urllib.request
 import urllib.error
 import xml.etree.ElementTree as ET
@@ -292,7 +293,7 @@ class PureHikClient:
             if e.code in (401, 403):
                 raise
             analog_err = e
-        except (ConnectionError, socket.error):
+        except (ConnectionError, socket.error, urllib.error.URLError):
             raise
         except Exception as e:
             analog_err = e
@@ -316,7 +317,7 @@ class PureHikClient:
                 raise
             if analog_err and not channels:
                 raise analog_err
-        except (ConnectionError, socket.error):
+        except (ConnectionError, socket.error, urllib.error.URLError):
             raise
         except Exception:
             if analog_err and not channels:

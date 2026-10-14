@@ -180,6 +180,15 @@ class TestPureHikClientMocked(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError):
             self.client.get_video_channels()
 
+    def test_get_video_channels_connection_failure_propagates(self):
+        import socket
+        # Test socket error / connection refused propagates without NameError
+        sock_err = urllib.error.URLError(socket.error("Connection refused"))
+        self.client.opener.open.side_effect = sock_err
+
+        with self.assertRaises(urllib.error.URLError):
+            self.client.get_video_channels()
+
     def test_set_channel_name_xml_escaping(self):
         self.client.opener.open.return_value = MockHttpResponse(b"<ResponseStatus>OK</ResponseStatus>")
         ok = self.client.set_channel_name(1, "Gate <1> & Office")
